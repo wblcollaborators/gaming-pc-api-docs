@@ -1,0 +1,1861 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: Universal Gaming PC Agent Platform API
+  version: 1.0.0
+  summary: Authorized gaming-PC session control for independent booking applications.
+  description: |
+    HTTP contract for the Universal Gaming PC Agent Platform. Cloud and
+    on-premise controllers keep these paths and schemas. This document is
+    not a workstation lock and is not a production deployment.
+
+    The server URL includes the base path `/api/v1`. Paths below are relative
+    to that base. Cloud and on-premise deployments change `controllerHost`
+    and keep these paths and schemas.
+
+    `GET /health` reports whether the controller process is running. HTTP 200
+    and `status: ok` do not mean a gaming PC is connected, a session is
+    active, or access is locked.
+
+    Session-changing responses distinguish controller acceptance from a
+    confirmed device effect. Callers read `outcome`, `start_confirmed`,
+    `lock_confirmed`, and `device_effect_confirmed`. HTTP 202 with
+    `outcome: accepted` means the controller stored a command. Confirmed
+    play is `start_confirmed: true`. A verified lock is `lock_confirmed: true`,
+    which is set only from an authenticated enforcement result. Session
+    status `ended` or `expired` does not by itself verify a lock.
+
+    Identifiers, timestamps, and the enrollment token in the examples are
+    fictional. Numeric timeouts in examples are provisional design examples
+    from ADR-001, not production-approved security settings.
+    `EXAMPLE_ONLY_NOT_A_REAL_SECRET` is not a credential.
+
+    Normative lifecycle rules are in `contracts/session-lifecycle.md` and
+    `contracts/device-lifecycle.md`. Security requirements are in
+    `docs/security-model.md`.
+
+    This document is the published integration contract. It lists only
+    operations this controller process serves: GET /health, POST /devices,
+    GET /devices, POST /sessions, GET /sessions/{session_id},
+    POST /sessions/{session_id}/extend, POST /sessions/{session_id}/end,
+    and POST /agents/heartbeat. Planned reads that are not served are in
+    `api/future-endpoints.md`. Booking clients list devices and poll
+    GET /sessions/{session_id}. Booking HTTP does not lock a PC. Confirmed
+    play is start_confirmed. A verified lock is lock_confirmed.
+servers:
+  - url: https://{controllerHost}/api/v1
+    description: One controller contract for cloud and on-premise deployments.
+    variables:
+      controllerHost:
+        default: controller.example
+        description: Deployment-specific controller hostname. Not a production endpoint.
+tags:
+  - name: Controller
+    description: Controller process health. This does not report device, session, or lock state.
+  - name: Devices
+    description: Device registration and observed device status.
+  - name: Sessions
+    description: Authorized session requests. Acceptance is separate from confirmed play or lock.
+  - name: Commands
+    description: >
+      Command objects are returned on session create, extend, and end.
+      This contract does not include a command GET operation.
+  - name: Agents
+    description: Agent heartbeat, reported access state, and command exchange.
+paths:
+  /health:
+    get:
+      tags: [Controller]
+      operationId: getHealth
+      summary: Report whether the controller process is healthy
+      description: |
+        Checks this controller process only. HTTP 200 and status ok mean the
+        process answered. They do not mean a gaming PC is connected, a session
+        is active, or access is locked. This operation does not use booking
+        or agent credentials.
+      security: []
+      responses:
+        "200":
+          description: The controller process is running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+              examples:
+                healthy:
+                  summary: Controller process is healthy
+                  value:
+                    status: ok
+  /devices:
+    post:
+      tags: [Devices]
+      operationId: registerDevice
+      summary: Register or provision a device
+      description: |
+        Creates a device record in the caller's account and returns a one-time
+        enrollment token. This response does not contact the PC.
+
+        The same Idempotency-Key and body return the original 201 response
+        while the enrollment token is still retained. After that retention
+        window the same key returns 409 enrollment_replay_unavailable and
+        does not mint another token. The retention window is a working
+        assumption in ADR-001.
+
+        A different key that repeats an existing device external_reference
+        in the account returns 409 external_reference_conflict with device_id
+        in error.details. The Idempotency-Key is scoped to the authenticated
+        account. Another account's use of the same key does not return this
+        registration.
+      security:
+        - bookingOAuth2: [devices:write]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDeviceRequest"
+            examples:
+              registerStation:
+                summary: Register a Windows station
+                value:
+                  display_name: Station 12
+                  platform: windows
+                  external_reference: station-12
+      responses:
+        "201":
+          description: Device record created. The PC has not been contacted.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceRegistrationResult"
+              examples:
+                created:
+                  $ref: "#/components/examples/DeviceRegistered"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+    get:
+      tags: [Devices]
+      operationId: listDevices
+      summary: List authorized devices
+      description: Returns devices in the caller's account. The cursor is opaque.
+      security:
+        - bookingOAuth2: [devices:read]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PlatformFilter"
+        - $ref: "#/components/parameters/ConnectivityFilter"
+      responses:
+        "200":
+          description: Devices visible to the caller. The list may be empty.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceList"
+              examples:
+                oneDevice:
+                  $ref: "#/components/examples/DeviceListExample"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+  /sessions:
+    post:
+      tags: [Sessions]
+      operationId: createSession
+      summary: Request a new authorized session
+      description: |
+        Authorizes a session and stores a start_session command.
+
+        A successful first response is HTTP 202 with outcome accepted,
+        session status accepted, and start_confirmed false. That is controller
+        acceptance. The expires_at value is the authorized deadline. It is not
+        evidence that play has started, and passing that time does not by
+        itself confirm a lock.
+
+        Poll GET /sessions/{session_id}. Play is
+        confirmed only when start_confirmed is true. A retry uses the same
+        Idempotency-Key and body and receives the current session together
+        with its latest command. That replay may show effect_confirmed,
+        effect_not_applied, or a replacement start command if the first
+        command expired before the session deadline.
+
+        A different key is rejected with 409 device_session_conflict when the
+        device already has a non-terminal session. A different key whose
+        external_reference matches a non-terminal session in the account is
+        rejected with 409 external_reference_conflict, and error.details
+        includes session_id.
+      security:
+        - bookingOAuth2: [sessions:write]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+            examples:
+              startBooking:
+                $ref: "#/components/examples/CreateSessionRequestExample"
+      responses:
+        "200":
+          description: |
+            Replay of an earlier create whose session is already terminal or
+            whose start effect is already confirmed. Read outcome. This status
+            is not used for the first acceptance.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionCommandResult"
+        "202":
+          description: |
+            The controller accepted the request and stored a start command.
+            The device effect is unconfirmed. start_confirmed is false.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionCommandResult"
+              examples:
+                accepted:
+                  $ref: "#/components/examples/SessionStartAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+  /sessions/{session_id}:
+    get:
+      tags: [Sessions]
+      operationId: getSession
+      summary: Retrieve session state and expiry
+      description: |
+        Returns the controller's current session record. status accepted means
+        the controller stored the session and play is unconfirmed. status
+        active means start enforcement was verified. status ending means an
+        explicit end was accepted and not yet executed. status ended means
+        that end was executed. status expired means the authorized deadline
+        was reached. status failed means start definitively failed. None of
+        ended, expired, or failed implies lock_confirmed.
+      security:
+        - bookingOAuth2: [sessions:read]
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Current session state.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+              examples:
+                active:
+                  $ref: "#/components/examples/ActiveSession"
+                ending:
+                  $ref: "#/components/examples/EndingSession"
+                expired:
+                  $ref: "#/components/examples/ExpiredSession"
+                endedWithoutLock:
+                  $ref: "#/components/examples/EndedWithoutLock"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+  /sessions/{session_id}/extend:
+    post:
+      tags: [Sessions]
+      operationId: extendSession
+      summary: Request an authorized session extension
+      description: |
+        Valid only when session status is active. The requested expires_at
+        must be later than the current authorized expires_at.
+
+        HTTP 202 outcome accepted stores an extend_session command and sets
+        pending_expires_at. That response is not a completed extension.
+        expires_at stays the previous deadline until a verified extend result
+        is accepted at a controller time still before that deadline. A
+        timeout, a rejection, or lost connectivity leaves the previous
+        deadline in force. A second extend while one is pending, delivered,
+        acknowledged, or executed returns 409 extension_in_progress unless
+        the idempotency key matches the outstanding extend.
+      security:
+        - bookingOAuth2: [sessions:write]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtendSessionRequest"
+            examples:
+              extendOneHour:
+                summary: Request a later authorized deadline
+                value:
+                  expires_at: "2026-10-09T12:00:00Z"
+      responses:
+        "200":
+          description: |
+            Replay of an extend that has already reached a terminal command
+            result. effect_confirmed means the new deadline is authorized.
+            effect_not_applied means the extension failed and expires_at is
+            unchanged.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionCommandResult"
+        "202":
+          description: |
+            Extension request stored. pending_expires_at holds the requested
+            deadline. expires_at is still the previous authorized deadline.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionCommandResult"
+              examples:
+                accepted:
+                  $ref: "#/components/examples/SessionExtendAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+  /sessions/{session_id}/end:
+    post:
+      tags: [Sessions]
+      operationId: endSession
+      summary: Request early termination and locking
+      description: |
+        Asks the controller to end the session and have the agent lock the PC.
+
+        When the session is active, or the start command was already delivered,
+        the response is HTTP 202 outcome accepted, session status ending, and
+        lock_confirmed false. A pending end_session command is stored. Status
+        ended on a later read means that command was executed. lock_confirmed
+        becomes true only when an authenticated result says OS enforcement
+        succeeded.
+
+        When the start command is still pending, the controller cancels that
+        command and returns HTTP 200 outcome effect_not_applied with session
+        status cancelled and lock_confirmed false. The start command was never
+        offered to the agent.
+
+        When the session is already ended, the response is HTTP 200 and returns
+        the current end command. outcome is effect_confirmed only when
+        lock_confirmed is true. A repeated end does not create a second end
+        command.
+
+        reason may be user_request or operator. deadline_reached is reserved
+        for a command the controller creates when the authorization window
+        elapses. An omitted body uses reason user_request.
+
+        A start command whose status is expired was not delivered. That end
+        cancels the session and does not store end_session. The returned
+        command is that start command. A pending extend_session command is
+        withdrawn when an end_session command is stored. pending_expires_at
+        is cleared. lock_confirmed stays false.
+      security:
+        - bookingOAuth2: [sessions:write]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EndSessionRequest"
+            examples:
+              userRequest:
+                summary: Booking application requests termination
+                value:
+                  reason: user_request
+      responses:
+        "200":
+          description: |
+            The end request is already in a stored result. effect_confirmed
+            means lock_confirmed is true. effect_not_applied covers a
+            cancelled session, or an executed end whose lock is still
+            unverified.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionCommandResult"
+              examples:
+                cancelledBeforeDispatch:
+                  $ref: "#/components/examples/SessionEndCancelledBeforeDispatch"
+        "202":
+          description: |
+            End accepted. Session status is ending and lock_confirmed is false.
+            The response does not mean the PC is locked.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionCommandResult"
+              examples:
+                accepted:
+                  $ref: "#/components/examples/SessionEndAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+  /agents/heartbeat:
+    post:
+      tags: [Agents]
+      operationId: submitAgentHeartbeat
+      summary: Submit an agent heartbeat and reported status
+      description: |
+        Agent-only operation. The client certificate must match device_id.
+        Booking credentials receive 403.
+
+        The controller records freshness from its own receipt time. The agent
+        reported_at must fall within the allowed clock skew or the request
+        fails with 422 clock_skew and changes no state.
+
+        command_results are applied before pending_commands is built. outcome
+        recorded means the heartbeat was stored. Commands returned in
+        pending_commands are not yet executed. The agent applies each
+        command_id at most once. The same command may be offered again until
+        a terminal result is stored.
+
+        An invalid certificate may fail the TLS handshake before an HTTP
+        status exists. A revoked device that still completes TLS receives 401.
+      security:
+        - agentMutualTls: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HeartbeatRequest"
+            examples:
+              reportStart:
+                $ref: "#/components/examples/HeartbeatReportStart"
+      responses:
+        "200":
+          description: |
+            Heartbeat stored. outcome is recorded. pending_commands are
+            outstanding work, not confirmed execution.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeartbeatResponse"
+              examples:
+                startRecorded:
+                  $ref: "#/components/examples/HeartbeatStartRecorded"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+components:
+  headers:
+    RequestId:
+      description: |
+        Identifier for this HTTP request. It matches error.request_id when
+        the body is an error. When the caller sent a UUID in X-Request-Id,
+        this value is that UUID. Otherwise the controller generates one.
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    RetryAfter:
+      description: Minimum number of seconds the client waits before retrying.
+      schema:
+        type: integer
+        minimum: 0
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Caller-generated key. A retry sends the same key and the same body.
+        The same key with a different body returns 409 idempotency_conflict.
+        A missing header returns 400 idempotency_key_required. A header that
+        fails this schema returns 400 validation_error. Retention of the key
+        is a provisional design example in ADR-001, not a production-approved
+        security setting.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+        pattern: "^[A-Za-z0-9._:-]+$"
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of devices to return.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque cursor returned as next_cursor. Callers do not invent cursors.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 512
+    PlatformFilter:
+      name: platform
+      in: query
+      required: false
+      description: Return only devices with this platform.
+      schema:
+        $ref: "#/components/schemas/Platform"
+    ConnectivityFilter:
+      name: connectivity
+      in: query
+      required: false
+      description: Return only devices with this derived connectivity.
+      schema:
+        $ref: "#/components/schemas/Connectivity"
+    DeviceId:
+      name: device_id
+      in: path
+      required: true
+      description: Device identifier assigned by the controller.
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      description: Session identifier assigned by the controller.
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    CommandId:
+      name: command_id
+      in: path
+      required: true
+      description: Command identifier assigned by the controller.
+      schema:
+        $ref: "#/components/schemas/Uuid"
+  securitySchemes:
+    bookingOAuth2:
+      type: oauth2
+      description: |
+        OAuth 2.0 client credentials for provisioning and booking clients.
+        The controller validates the bearer access token with the issuer's
+        JWKS: signature, issuer, audience, and expiry. The token URL is a
+        placeholder, not a route of this service. account_id comes from the
+        deployment-configured token claim. Callers do not send account_id.
+        See docs/ADR-003-identity-provider.md.
+      flows:
+        clientCredentials:
+          tokenUrl: https://controller.example/oauth/token
+          scopes:
+            devices:read: Read devices and device status in the caller's account.
+            devices:write: Register a device in the caller's account.
+            sessions:read: Read sessions in the caller's account.
+            sessions:write: Create, extend, and end sessions in the caller's account.
+            commands:read: Read commands in the caller's account.
+    agentMutualTls:
+      type: mutualTLS
+      description: |
+        Agent authentication. The client certificate must chain to the
+        controller trust anchor and match a pre-provisioned fingerprint for
+        one device_id. OAuth bearer tokens receive 403 on agent routes.
+        Heartbeat storage is implemented. Command exchange is not.
+  responses:
+    BadRequest:
+      description: |
+        The JSON is malformed, a required idempotency key is missing, a value
+        has the wrong type, an unknown field was sent, or a header failed
+        schema validation. error.code is invalid_json, idempotency_key_required,
+        or validation_error.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: |
+        The credential is missing, invalid, or revoked. error.code is
+        unauthorized. An agent certificate may instead fail during the TLS
+        handshake, in which case no HTTP response is produced.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: |
+        The credential is valid and does not authorize this operation, or the
+        agent certificate does not match device_id. error.code is forbidden
+        or device_identity_mismatch.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: |
+        No resource in the caller's account matches the identifier.
+        Identifiers that exist in another account also use this response,
+        so the API does not reveal them. error.code is not_found,
+        device_not_found, session_not_found, or command_not_found.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: |
+        The request is well formed and conflicts with stored state or with a
+        previous use of the same Idempotency-Key. error.code identifies the
+        conflict. See contracts/error-model.md.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnsupportedMediaType:
+      description: A body was sent with a media type other than application/json. error.code is unsupported_media_type.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnprocessableEntity:
+      description: |
+        The JSON types are valid and a semantic rule failed. Examples are a
+        deadline that is not in the future, an extension that is not later
+        than the current deadline, platform_not_available, and clock_skew.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    StorageUnavailable:
+      description: Device storage is unavailable. error.code is storage_unavailable. The response does not include database connection details.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    TooManyRequests:
+      description: |
+        The caller's account exceeded the deployment rate limit. error.code is
+        rate_limited. Limits are per account_id and shared through PostgreSQL.
+        Numeric values are deployment configuration. Retry-After is seconds
+        until the current window ends. A stored Idempotency-Key replay does
+        not consume a slot.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  examples:
+    DeviceRegistered:
+      summary: Device created and enrollment token issued once
+      value:
+        outcome: created
+        device:
+          device_id: "22222222-2222-4222-8222-222222222222"
+          account_id: "11111111-1111-4111-8111-111111111111"
+          display_name: Station 12
+          platform: windows
+          agent_version: null
+          external_reference: station-12
+          status:
+            device_id: "22222222-2222-4222-8222-222222222222"
+            connectivity: offline
+            access_state: unknown
+            last_reported_access_state: unknown
+            reported_at: null
+            last_seen_at: null
+            status_stale: true
+            stale_after_seconds: 90
+          created_at: "2026-10-09T09:00:00Z"
+          updated_at: "2026-10-09T09:00:00Z"
+        enrollment:
+          credential_id: "55555555-5555-4555-8555-555555555555"
+          credential_type: device_certificate_enrollment
+          one_time_enrollment_token: EXAMPLE_ONLY_NOT_A_REAL_SECRET
+          secret_handling: returned_once
+    RegisteredDevice:
+      summary: Device details before the first heartbeat
+      value:
+        device_id: "22222222-2222-4222-8222-222222222222"
+        account_id: "11111111-1111-4111-8111-111111111111"
+        display_name: Station 12
+        platform: windows
+        agent_version: null
+        external_reference: station-12
+        status:
+          device_id: "22222222-2222-4222-8222-222222222222"
+          connectivity: offline
+          access_state: unknown
+          last_reported_access_state: unknown
+          reported_at: null
+          last_seen_at: null
+          status_stale: true
+          stale_after_seconds: 90
+        created_at: "2026-10-09T09:00:00Z"
+        updated_at: "2026-10-09T09:00:00Z"
+    DeviceListExample:
+      summary: One registered device and no further page
+      value:
+        items:
+          - device_id: "22222222-2222-4222-8222-222222222222"
+            account_id: "11111111-1111-4111-8111-111111111111"
+            display_name: Station 12
+            platform: windows
+            agent_version: null
+            external_reference: station-12
+            status:
+              device_id: "22222222-2222-4222-8222-222222222222"
+              connectivity: offline
+              access_state: unknown
+              last_reported_access_state: unknown
+              reported_at: null
+              last_seen_at: null
+              status_stale: true
+              stale_after_seconds: 90
+            created_at: "2026-10-09T09:00:00Z"
+            updated_at: "2026-10-09T09:00:00Z"
+        next_cursor: null
+    DeviceStatusNeverSeen:
+      summary: No heartbeat has been accepted
+      value:
+        device_id: "22222222-2222-4222-8222-222222222222"
+        connectivity: offline
+        access_state: unknown
+        last_reported_access_state: unknown
+        reported_at: null
+        last_seen_at: null
+        status_stale: true
+        stale_after_seconds: 90
+    CreateSessionRequestExample:
+      summary: Authorize one hour on a registered device
+      value:
+        device_id: "22222222-2222-4222-8222-222222222222"
+        external_reference: booking-98421
+        expires_at: "2026-10-09T11:00:00Z"
+    SessionStartAccepted:
+      summary: Start accepted and waiting for the agent
+      value:
+        outcome: accepted
+        session:
+          session_id: "33333333-3333-4333-8333-333333333333"
+          account_id: "11111111-1111-4111-8111-111111111111"
+          device_id: "22222222-2222-4222-8222-222222222222"
+          external_reference: booking-98421
+          status: accepted
+          start_confirmed: false
+          lock_confirmed: false
+          lock_confirmed_at: null
+          started_at: null
+          expires_at: "2026-10-09T11:00:00Z"
+          pending_expires_at: null
+          ended_at: null
+          latest_command_id: "44444444-4444-4444-8444-444444444444"
+          error_code: null
+          created_at: "2026-10-09T10:00:00Z"
+          updated_at: "2026-10-09T10:00:00Z"
+        command:
+          command_id: "44444444-4444-4444-8444-444444444444"
+          account_id: "11111111-1111-4111-8111-111111111111"
+          device_id: "22222222-2222-4222-8222-222222222222"
+          session_id: "33333333-3333-4333-8333-333333333333"
+          command_type: start_session
+          status: pending
+          device_effect_confirmed: false
+          parameters:
+            command_type: start_session
+            expires_at: "2026-10-09T11:00:00Z"
+          error_code: null
+          created_at: "2026-10-09T10:00:00Z"
+          expires_at: "2026-10-09T10:02:00Z"
+          completed_at: null
+          updated_at: "2026-10-09T10:00:00Z"
+    ActiveSession:
+      summary: Agent confirmed that play started
+      value:
+        session_id: "33333333-3333-4333-8333-333333333333"
+        account_id: "11111111-1111-4111-8111-111111111111"
+        device_id: "22222222-2222-4222-8222-222222222222"
+        external_reference: booking-98421
+        status: active
+        start_confirmed: true
+        lock_confirmed: false
+        lock_confirmed_at: null
+        started_at: "2026-10-09T10:00:05Z"
+        expires_at: "2026-10-09T11:00:00Z"
+        pending_expires_at: null
+        ended_at: null
+        latest_command_id: "44444444-4444-4444-8444-444444444444"
+        error_code: null
+        created_at: "2026-10-09T10:00:00Z"
+        updated_at: "2026-10-09T10:00:05Z"
+    EndingSession:
+      summary: End accepted and lock unconfirmed
+      value:
+        session_id: "33333333-3333-4333-8333-333333333333"
+        account_id: "11111111-1111-4111-8111-111111111111"
+        device_id: "22222222-2222-4222-8222-222222222222"
+        external_reference: booking-98421
+        status: ending
+        start_confirmed: true
+        lock_confirmed: false
+        lock_confirmed_at: null
+        started_at: "2026-10-09T10:00:05Z"
+        expires_at: "2026-10-09T11:00:00Z"
+        pending_expires_at: null
+        ended_at: null
+        latest_command_id: "66666666-6666-4666-8666-666666666666"
+        error_code: null
+        created_at: "2026-10-09T10:00:00Z"
+        updated_at: "2026-10-09T10:30:00Z"
+    SessionExtendAccepted:
+      summary: Extension stored and previous deadline still authorized
+      value:
+        outcome: accepted
+        session:
+          session_id: "33333333-3333-4333-8333-333333333333"
+          account_id: "11111111-1111-4111-8111-111111111111"
+          device_id: "22222222-2222-4222-8222-222222222222"
+          external_reference: booking-98421
+          status: active
+          start_confirmed: true
+          lock_confirmed: false
+          lock_confirmed_at: null
+          started_at: "2026-10-09T10:00:05Z"
+          expires_at: "2026-10-09T11:00:00Z"
+          pending_expires_at: "2026-10-09T12:00:00Z"
+          ended_at: null
+          latest_command_id: "88888888-8888-4888-8888-888888888888"
+          error_code: null
+          created_at: "2026-10-09T10:00:00Z"
+          updated_at: "2026-10-09T10:15:00Z"
+        command:
+          command_id: "88888888-8888-4888-8888-888888888888"
+          account_id: "11111111-1111-4111-8111-111111111111"
+          device_id: "22222222-2222-4222-8222-222222222222"
+          session_id: "33333333-3333-4333-8333-333333333333"
+          command_type: extend_session
+          status: pending
+          device_effect_confirmed: false
+          parameters:
+            command_type: extend_session
+            expires_at: "2026-10-09T12:00:00Z"
+          error_code: null
+          created_at: "2026-10-09T10:15:00Z"
+          expires_at: "2026-10-09T10:17:00Z"
+          completed_at: null
+          updated_at: "2026-10-09T10:15:00Z"
+    SessionEndAccepted:
+      summary: End accepted and lock unconfirmed
+      value:
+        outcome: accepted
+        session:
+          session_id: "33333333-3333-4333-8333-333333333333"
+          account_id: "11111111-1111-4111-8111-111111111111"
+          device_id: "22222222-2222-4222-8222-222222222222"
+          external_reference: booking-98421
+          status: ending
+          start_confirmed: true
+          lock_confirmed: false
+          lock_confirmed_at: null
+          started_at: "2026-10-09T10:00:05Z"
+          expires_at: "2026-10-09T11:00:00Z"
+          pending_expires_at: null
+          ended_at: null
+          latest_command_id: "66666666-6666-4666-8666-666666666666"
+          error_code: null
+          created_at: "2026-10-09T10:00:00Z"
+          updated_at: "2026-10-09T10:30:00Z"
+        command:
+          command_id: "66666666-6666-4666-8666-666666666666"
+          account_id: "11111111-1111-4111-8111-111111111111"
+          device_id: "22222222-2222-4222-8222-222222222222"
+          session_id: "33333333-3333-4333-8333-333333333333"
+          command_type: end_session
+          status: pending
+          device_effect_confirmed: false
+          parameters:
+            command_type: end_session
+            reason: user_request
+          error_code: null
+          created_at: "2026-10-09T10:30:00Z"
+          expires_at: "2026-10-09T10:35:00Z"
+          completed_at: null
+          updated_at: "2026-10-09T10:30:00Z"
+    SessionEndCancelledBeforeDispatch:
+      summary: Start withdrawn before it was offered to the agent
+      value:
+        outcome: effect_not_applied
+        session:
+          session_id: "33333333-3333-4333-8333-333333333333"
+          account_id: "11111111-1111-4111-8111-111111111111"
+          device_id: "22222222-2222-4222-8222-222222222222"
+          external_reference: booking-98421
+          status: cancelled
+          start_confirmed: false
+          lock_confirmed: false
+          lock_confirmed_at: null
+          started_at: null
+          expires_at: "2026-10-09T11:00:00Z"
+          pending_expires_at: null
+          ended_at: "2026-10-09T10:01:00Z"
+          latest_command_id: "44444444-4444-4444-8444-444444444444"
+          error_code: null
+          created_at: "2026-10-09T10:00:00Z"
+          updated_at: "2026-10-09T10:01:00Z"
+        command:
+          command_id: "44444444-4444-4444-8444-444444444444"
+          account_id: "11111111-1111-4111-8111-111111111111"
+          device_id: "22222222-2222-4222-8222-222222222222"
+          session_id: "33333333-3333-4333-8333-333333333333"
+          command_type: start_session
+          status: cancelled
+          device_effect_confirmed: false
+          parameters:
+            command_type: start_session
+            expires_at: "2026-10-09T11:00:00Z"
+          error_code: null
+          created_at: "2026-10-09T10:00:00Z"
+          expires_at: "2026-10-09T10:02:00Z"
+          completed_at: null
+          updated_at: "2026-10-09T10:01:00Z"
+    StartCommandPending:
+      summary: Start command stored and not yet confirmed
+      value:
+        command_id: "44444444-4444-4444-8444-444444444444"
+        account_id: "11111111-1111-4111-8111-111111111111"
+        device_id: "22222222-2222-4222-8222-222222222222"
+        session_id: "33333333-3333-4333-8333-333333333333"
+        command_type: start_session
+        status: pending
+        device_effect_confirmed: false
+        parameters:
+          command_type: start_session
+          expires_at: "2026-10-09T11:00:00Z"
+        error_code: null
+        created_at: "2026-10-09T10:00:00Z"
+        expires_at: "2026-10-09T10:02:00Z"
+        completed_at: null
+        updated_at: "2026-10-09T10:00:00Z"
+    StartCommandSucceeded:
+      summary: Agent confirmed that the start command took effect
+      value:
+        command_id: "44444444-4444-4444-8444-444444444444"
+        account_id: "11111111-1111-4111-8111-111111111111"
+        device_id: "22222222-2222-4222-8222-222222222222"
+        session_id: "33333333-3333-4333-8333-333333333333"
+        command_type: start_session
+        status: succeeded
+        device_effect_confirmed: true
+        parameters:
+          command_type: start_session
+          expires_at: "2026-10-09T11:00:00Z"
+        error_code: null
+        created_at: "2026-10-09T10:00:00Z"
+        expires_at: "2026-10-09T10:02:00Z"
+        completed_at: "2026-10-09T10:00:05Z"
+        updated_at: "2026-10-09T10:00:05Z"
+    HeartbeatReportStart:
+      summary: Agent reports that start_session succeeded
+      value:
+        device_id: "22222222-2222-4222-8222-222222222222"
+        reported_at: "2026-10-09T10:00:05Z"
+        agent_version: "0.1.0"
+        access_state: playing
+        current_session_id: "33333333-3333-4333-8333-333333333333"
+        command_results:
+          - command_id: "44444444-4444-4444-8444-444444444444"
+            status: succeeded
+            completed_at: "2026-10-09T10:00:05Z"
+            error_code: null
+            enforcement_succeeded: true
+        local_enforcement: null
+    HeartbeatStartRecorded:
+      summary: Controller stored the heartbeat and the start result
+      value:
+        outcome: recorded
+        device_id: "22222222-2222-4222-8222-222222222222"
+        received_at: "2026-10-09T10:00:05Z"
+        status:
+          device_id: "22222222-2222-4222-8222-222222222222"
+          connectivity: online
+          access_state: playing
+          last_reported_access_state: playing
+          reported_at: "2026-10-09T10:00:05Z"
+          last_seen_at: "2026-10-09T10:00:05Z"
+          status_stale: false
+          stale_after_seconds: 90
+        next_heartbeat_before: "2026-10-09T10:01:35Z"
+        pending_commands: []
+        applied_command_results:
+          - command_id: "44444444-4444-4444-8444-444444444444"
+            status: succeeded
+            device_effect_confirmed: true
+        rejected_command_results: []
+        local_enforcement_outcome: null
+    ExpiredSession:
+      summary: Deadline reached after play was confirmed, lock unverified
+      description: Provisional timestamps illustrate ADR-001 examples, not approved security settings.
+      value:
+        session_id: "33333333-3333-4333-8333-333333333333"
+        account_id: "11111111-1111-4111-8111-111111111111"
+        device_id: "22222222-2222-4222-8222-222222222222"
+        external_reference: booking-98421
+        status: expired
+        start_confirmed: true
+        lock_confirmed: false
+        lock_confirmed_at: null
+        started_at: "2026-10-09T10:00:05Z"
+        expires_at: "2026-10-09T11:00:00Z"
+        pending_expires_at: null
+        ended_at: "2026-10-09T11:00:00Z"
+        latest_command_id: "66666666-6666-4666-8666-666666666666"
+        error_code: null
+        created_at: "2026-10-09T10:00:00Z"
+        updated_at: "2026-10-09T11:00:00Z"
+    EndedWithoutLock:
+      summary: Explicit end executed without a verified lock
+      value:
+        session_id: "33333333-3333-4333-8333-333333333333"
+        account_id: "11111111-1111-4111-8111-111111111111"
+        device_id: "22222222-2222-4222-8222-222222222222"
+        external_reference: booking-98421
+        status: ended
+        start_confirmed: true
+        lock_confirmed: false
+        lock_confirmed_at: null
+        started_at: "2026-10-09T10:00:05Z"
+        expires_at: "2026-10-09T11:00:00Z"
+        pending_expires_at: null
+        ended_at: "2026-10-09T10:40:00Z"
+        latest_command_id: "66666666-6666-4666-8666-666666666666"
+        error_code: null
+        created_at: "2026-10-09T10:00:00Z"
+        updated_at: "2026-10-09T10:40:00Z"
+    DeviceStatusUnreachable:
+      summary: Last report is no longer fresh, so current access is unknown
+      description: stale_after_seconds 90 is a provisional design example.
+      value:
+        device_id: "22222222-2222-4222-8222-222222222222"
+        connectivity: offline
+        access_state: unknown
+        last_reported_access_state: playing
+        reported_at: "2026-10-09T10:00:05Z"
+        last_seen_at: "2026-10-09T10:00:05Z"
+        status_stale: true
+        stale_after_seconds: 90
+  schemas:
+    HealthStatus:
+      type: object
+      additionalProperties: false
+      description: |
+        Process health of this controller. status ok means the process
+        answered. It does not mean a gaming PC is connected, a session is
+        active, or access is locked.
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+          description: The controller process is healthy.
+    Uuid:
+      type: string
+      format: uuid
+      description: UUID string assigned by the controller or supplied as a path identifier.
+    NullableUuid:
+      description: UUID, or null when no identifier applies.
+      oneOf:
+        - type: "null"
+        - $ref: "#/components/schemas/Uuid"
+    UtcDateTime:
+      type: string
+      format: date-time
+      pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+      description: UTC timestamp in ISO 8601 format with a Z suffix.
+    NullableUtcDateTime:
+      description: UTC timestamp with a Z suffix, or null.
+      oneOf:
+        - type: "null"
+        - $ref: "#/components/schemas/UtcDateTime"
+    ExternalReference:
+      type: string
+      minLength: 1
+      maxLength: 256
+      description: Opaque identifier from the booking or provisioning application.
+    NullableExternalReference:
+      description: Booking or station identifier supplied by the caller, or null when omitted at creation.
+      oneOf:
+        - type: "null"
+        - $ref: "#/components/schemas/ExternalReference"
+    AgentVersion:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$"
+      description: Version string reported by a future agent. Example values are fictional.
+    Platform:
+      type: string
+      enum: [windows, linux]
+      description: |
+        windows is the first enforcement target. linux is reserved so a
+        future Linux agent can use this contract. A deployment without a
+        Linux module rejects registration with platform_not_available.
+    Connectivity:
+      type: string
+      enum: [online, offline]
+      description: Derived from heartbeat freshness. online means a heartbeat was accepted inside stale_after_seconds.
+    AccessState:
+      type: string
+      enum: [locked, playing, unknown]
+      description: |
+        Trusted access state. unknown means no report has arrived, the agent
+        reported unknown, or the last report is outside the freshness window.
+    SessionStatus:
+      type: string
+      enum: [requested, accepted, active, ending, ended, expired, failed, cancelled]
+      description: |
+        Authorization lifecycle. pending is not a value in this enum. A booking
+        request that is stored and not yet delivered is accepted, with the
+        start_session command status pending and start_confirmed false.
+        requested is an unfinished check. cancelled withdraws the session
+        before start delivery. failed is a definitive start failure. ending is
+        an accepted end that is not yet executed. expired means the authorized
+        deadline was reached. ended means an explicit end was executed. None
+        of ended, expired, or failed sets lock_confirmed. access_state is a
+        device observation and is not derived from this status.
+        See contracts/session-lifecycle.md and docs/booking-sessions.md.
+    CommandStatus:
+      type: string
+      enum: [pending, delivered, acknowledged, executed, succeeded, failed, expired, cancelled]
+      description: |
+        pending is controller acceptance. delivered is inclusion in a heartbeat
+        response. acknowledged is agent receipt. executed is an execution
+        report without a verified OS effect. succeeded is the only status with
+        device_effect_confirmed true. expired means the command TTL elapsed
+        with no definitive execution result and is not a failure.
+    CommandType:
+      type: string
+      enum: [start_session, extend_session, end_session]
+      description: Closed command set. There is no shell, executable, or arbitrary command type.
+    CommandErrorCode:
+      type: string
+      enum:
+        - enforcement_failed
+        - session_not_recognized
+        - device_busy
+        - invalid_command
+        - authorization_window_elapsed
+        - command_expired
+      description: Stored operation error. Absent in the HTTP error object, which uses ApiErrorCode.
+    NullableCommandErrorCode:
+      description: Stored operation error, or null when the operation has no error.
+      oneOf:
+        - type: "null"
+        - $ref: "#/components/schemas/CommandErrorCode"
+    ApiErrorCode:
+      type: string
+      enum:
+        - invalid_json
+        - validation_error
+        - idempotency_key_required
+        - idempotency_conflict
+        - enrollment_replay_unavailable
+        - unauthorized
+        - forbidden
+        - device_identity_mismatch
+        - not_found
+        - device_not_found
+        - session_not_found
+        - command_not_found
+        - device_session_conflict
+        - external_reference_conflict
+        - invalid_session_transition
+        - extension_in_progress
+        - platform_not_available
+        - clock_skew
+        - unsupported_media_type
+        - rate_limited
+        - storage_unavailable
+    SessionCommandOutcome:
+      type: string
+      enum: [accepted, effect_confirmed, effect_not_applied]
+      description: |
+        accepted means the controller stored work and the device effect is
+        unconfirmed. effect_confirmed means an agent result confirmed the
+        requested effect. effect_not_applied means the operation finished
+        without that effect.
+    DeviceStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - device_id
+        - connectivity
+        - access_state
+        - last_reported_access_state
+        - reported_at
+        - last_seen_at
+        - status_stale
+        - stale_after_seconds
+      properties:
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        connectivity:
+          $ref: "#/components/schemas/Connectivity"
+        access_state:
+          $ref: "#/components/schemas/AccessState"
+        last_reported_access_state:
+          $ref: "#/components/schemas/AccessState"
+        reported_at:
+          $ref: "#/components/schemas/NullableUtcDateTime"
+        last_seen_at:
+          $ref: "#/components/schemas/NullableUtcDateTime"
+        status_stale:
+          type: boolean
+          description: |
+            True when connectivity is offline. When true after a report, access_state
+            is unknown. last_reported_access_state keeps the previous observation.
+        stale_after_seconds:
+          type: integer
+          minimum: 1
+          description: |
+            Freshness threshold, in seconds, applied by the controller for this
+            response. Example values are provisional design examples, not
+            production-approved security settings.
+    Device:
+      type: object
+      additionalProperties: false
+      required:
+        - device_id
+        - account_id
+        - display_name
+        - platform
+        - agent_version
+        - external_reference
+        - status
+        - created_at
+        - updated_at
+      properties:
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        account_id:
+          $ref: "#/components/schemas/Uuid"
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        platform:
+          $ref: "#/components/schemas/Platform"
+        agent_version:
+          description: Null until an agent heartbeat reports a version.
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/AgentVersion"
+        external_reference:
+          $ref: "#/components/schemas/NullableExternalReference"
+        status:
+          $ref: "#/components/schemas/DeviceStatus"
+        created_at:
+          $ref: "#/components/schemas/UtcDateTime"
+        updated_at:
+          $ref: "#/components/schemas/UtcDateTime"
+    DeviceList:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Device"
+        next_cursor:
+          description: Opaque cursor for the next page, or null when this page is the last.
+          oneOf:
+            - type: "null"
+            - type: string
+              minLength: 1
+              maxLength: 512
+    CreateDeviceRequest:
+      type: object
+      additionalProperties: false
+      required: [display_name, platform]
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        platform:
+          $ref: "#/components/schemas/Platform"
+        external_reference:
+          $ref: "#/components/schemas/ExternalReference"
+    DeviceEnrollment:
+      type: object
+      additionalProperties: false
+      description: |
+        One-time enrollment material. The token is proposed input to a future
+        certificate exchange that is not an operation in this contract.
+        Examples use a placeholder, not a real secret.
+      required:
+        - credential_id
+        - credential_type
+        - one_time_enrollment_token
+        - secret_handling
+      properties:
+        credential_id:
+          $ref: "#/components/schemas/Uuid"
+        credential_type:
+          type: string
+          enum: [device_certificate_enrollment]
+        one_time_enrollment_token:
+          type: string
+          minLength: 1
+          maxLength: 512
+        secret_handling:
+          type: string
+          enum: [returned_once]
+    DeviceRegistrationResult:
+      type: object
+      additionalProperties: false
+      required: [outcome, device, enrollment]
+      properties:
+        outcome:
+          type: string
+          enum: [created]
+          description: The device record was created. The PC was not contacted.
+        device:
+          $ref: "#/components/schemas/Device"
+        enrollment:
+          $ref: "#/components/schemas/DeviceEnrollment"
+    Session:
+      type: object
+      additionalProperties: false
+      description: |
+        start_confirmed is true only after verified start enforcement.
+        lock_confirmed is true only after an authenticated result says OS
+        lock enforcement succeeded. It is independent of status ended and
+        status expired. expires_at is the last verified authorization deadline.
+        pending_expires_at is a requested extension and is not effective.
+        lock_confirmed_at is null until the lock result is stored.
+        ended_at is when a terminal session status was recorded, not the lock time.
+      required:
+        - session_id
+        - account_id
+        - device_id
+        - external_reference
+        - status
+        - start_confirmed
+        - lock_confirmed
+        - lock_confirmed_at
+        - started_at
+        - expires_at
+        - pending_expires_at
+        - ended_at
+        - latest_command_id
+        - error_code
+        - created_at
+        - updated_at
+      properties:
+        session_id:
+          $ref: "#/components/schemas/Uuid"
+        account_id:
+          $ref: "#/components/schemas/Uuid"
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        external_reference:
+          $ref: "#/components/schemas/NullableExternalReference"
+        status:
+          $ref: "#/components/schemas/SessionStatus"
+        start_confirmed:
+          type: boolean
+        lock_confirmed:
+          type: boolean
+        lock_confirmed_at:
+          $ref: "#/components/schemas/NullableUtcDateTime"
+        started_at:
+          $ref: "#/components/schemas/NullableUtcDateTime"
+        expires_at:
+          $ref: "#/components/schemas/UtcDateTime"
+        pending_expires_at:
+          $ref: "#/components/schemas/NullableUtcDateTime"
+        ended_at:
+          $ref: "#/components/schemas/NullableUtcDateTime"
+        latest_command_id:
+          $ref: "#/components/schemas/NullableUuid"
+        error_code:
+          $ref: "#/components/schemas/NullableCommandErrorCode"
+        created_at:
+          $ref: "#/components/schemas/UtcDateTime"
+        updated_at:
+          $ref: "#/components/schemas/UtcDateTime"
+    CreateSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [device_id, expires_at]
+      properties:
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        external_reference:
+          $ref: "#/components/schemas/ExternalReference"
+        expires_at:
+          $ref: "#/components/schemas/UtcDateTime"
+    ExtendSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [expires_at]
+      properties:
+        expires_at:
+          $ref: "#/components/schemas/UtcDateTime"
+    EndSessionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          enum: [user_request, operator]
+          default: user_request
+    StartSessionParameters:
+      type: object
+      additionalProperties: false
+      required: [command_type, expires_at]
+      properties:
+        command_type:
+          type: string
+          enum: [start_session]
+        expires_at:
+          $ref: "#/components/schemas/UtcDateTime"
+    ExtendSessionParameters:
+      type: object
+      additionalProperties: false
+      required: [command_type, expires_at]
+      properties:
+        command_type:
+          type: string
+          enum: [extend_session]
+        expires_at:
+          $ref: "#/components/schemas/UtcDateTime"
+    EndSessionParameters:
+      type: object
+      additionalProperties: false
+      required: [command_type, reason]
+      properties:
+        command_type:
+          type: string
+          enum: [end_session]
+        reason:
+          type: string
+          enum: [user_request, operator, deadline_reached]
+    Command:
+      type: object
+      additionalProperties: false
+      description: |
+        command_type is a closed set. parameters.command_type matches
+        command_type. The parameters objects contain a deadline or an end
+        reason. They contain no shell command, executable, or script.
+        device_effect_confirmed is true only when status is succeeded.
+        acknowledged, executed, and expired do not verify the OS effect.
+      required:
+        - command_id
+        - account_id
+        - device_id
+        - session_id
+        - command_type
+        - status
+        - device_effect_confirmed
+        - parameters
+        - error_code
+        - created_at
+        - expires_at
+        - completed_at
+        - updated_at
+      properties:
+        command_id:
+          $ref: "#/components/schemas/Uuid"
+        account_id:
+          $ref: "#/components/schemas/Uuid"
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        session_id:
+          $ref: "#/components/schemas/Uuid"
+        command_type:
+          $ref: "#/components/schemas/CommandType"
+        status:
+          $ref: "#/components/schemas/CommandStatus"
+        device_effect_confirmed:
+          type: boolean
+        parameters:
+          oneOf:
+            - $ref: "#/components/schemas/StartSessionParameters"
+            - $ref: "#/components/schemas/ExtendSessionParameters"
+            - $ref: "#/components/schemas/EndSessionParameters"
+          discriminator:
+            propertyName: command_type
+            mapping:
+              start_session: "#/components/schemas/StartSessionParameters"
+              extend_session: "#/components/schemas/ExtendSessionParameters"
+              end_session: "#/components/schemas/EndSessionParameters"
+        error_code:
+          $ref: "#/components/schemas/NullableCommandErrorCode"
+        created_at:
+          $ref: "#/components/schemas/UtcDateTime"
+        expires_at:
+          $ref: "#/components/schemas/UtcDateTime"
+        completed_at:
+          $ref: "#/components/schemas/NullableUtcDateTime"
+        updated_at:
+          $ref: "#/components/schemas/UtcDateTime"
+    SessionCommandResult:
+      type: object
+      additionalProperties: false
+      required: [outcome, session, command]
+      properties:
+        outcome:
+          $ref: "#/components/schemas/SessionCommandOutcome"
+        session:
+          $ref: "#/components/schemas/Session"
+        command:
+          $ref: "#/components/schemas/Command"
+    CommandResultReport:
+      type: object
+      additionalProperties: false
+      description: |
+        acknowledged is receipt. executed is an execution report and requires
+        enforcement_succeeded false. succeeded is a verified OS effect and
+        requires enforcement_succeeded true. failed is a definitive failure.
+      required: [command_id, status, completed_at, error_code, enforcement_succeeded]
+      properties:
+        command_id:
+          $ref: "#/components/schemas/Uuid"
+        status:
+          type: string
+          enum: [acknowledged, executed, succeeded, failed]
+        completed_at:
+          $ref: "#/components/schemas/UtcDateTime"
+        error_code:
+          $ref: "#/components/schemas/NullableCommandErrorCode"
+        enforcement_succeeded:
+          type: boolean
+    LocalEnforcementReport:
+      type: object
+      additionalProperties: false
+      description: |
+        Authenticated report that OS lock enforcement succeeded. It can set
+        lock_confirmed. It cannot start or extend play, and it does not by
+        itself change session status to ended.
+      required: [session_id, access_state, enforced_at, reason]
+      properties:
+        session_id:
+          $ref: "#/components/schemas/Uuid"
+        access_state:
+          type: string
+          enum: [locked]
+        enforced_at:
+          $ref: "#/components/schemas/UtcDateTime"
+        reason:
+          type: string
+          enum: [deadline_reached, reboot_after_deadline, no_valid_authorization]
+    HeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - device_id
+        - reported_at
+        - agent_version
+        - access_state
+        - current_session_id
+        - command_results
+        - local_enforcement
+      properties:
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        reported_at:
+          $ref: "#/components/schemas/UtcDateTime"
+        agent_version:
+          $ref: "#/components/schemas/AgentVersion"
+        access_state:
+          $ref: "#/components/schemas/AccessState"
+        current_session_id:
+          $ref: "#/components/schemas/NullableUuid"
+        command_results:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/CommandResultReport"
+        local_enforcement:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/LocalEnforcementReport"
+    AppliedCommandResult:
+      type: object
+      additionalProperties: false
+      required: [command_id, status, device_effect_confirmed]
+      properties:
+        command_id:
+          $ref: "#/components/schemas/Uuid"
+        status:
+          $ref: "#/components/schemas/CommandStatus"
+        device_effect_confirmed:
+          type: boolean
+    RejectedCommandResult:
+      type: object
+      additionalProperties: false
+      required: [command_id, code, message]
+      properties:
+        command_id:
+          $ref: "#/components/schemas/Uuid"
+        code:
+          type: string
+          enum:
+            - command_not_found
+            - conflicting_command_result
+            - invalid_command
+            - authorization_window_elapsed
+        message:
+          type: string
+          minLength: 1
+          maxLength: 512
+    LocalEnforcementOutcome:
+      type: object
+      additionalProperties: false
+      required: [session_id, applied, session_status, lock_confirmed, detail_code]
+      properties:
+        session_id:
+          $ref: "#/components/schemas/Uuid"
+        applied:
+          type: boolean
+        session_status:
+          $ref: "#/components/schemas/SessionStatus"
+        lock_confirmed:
+          type: boolean
+        detail_code:
+          oneOf:
+            - type: "null"
+            - type: string
+              enum: [session_not_found, session_not_eligible]
+    HeartbeatResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - outcome
+        - device_id
+        - received_at
+        - status
+        - next_heartbeat_before
+        - pending_commands
+        - applied_command_results
+        - rejected_command_results
+        - local_enforcement_outcome
+      properties:
+        outcome:
+          type: string
+          enum: [recorded]
+          description: The heartbeat was stored. Pending commands in this response are not executed yet.
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        received_at:
+          $ref: "#/components/schemas/UtcDateTime"
+        status:
+          $ref: "#/components/schemas/DeviceStatus"
+        next_heartbeat_before:
+          $ref: "#/components/schemas/UtcDateTime"
+        pending_commands:
+          type: array
+          items:
+            $ref: "#/components/schemas/Command"
+        applied_command_results:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppliedCommandResult"
+        rejected_command_results:
+          type: array
+          items:
+            $ref: "#/components/schemas/RejectedCommandResult"
+        local_enforcement_outcome:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/LocalEnforcementOutcome"
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        field:
+          type: string
+          minLength: 1
+          maxLength: 128
+        code:
+          type: string
+          minLength: 1
+          maxLength: 64
+        message:
+          type: string
+          minLength: 1
+          maxLength: 512
+        session_id:
+          $ref: "#/components/schemas/Uuid"
+        device_id:
+          $ref: "#/components/schemas/Uuid"
+        command_id:
+          $ref: "#/components/schemas/Uuid"
+    ErrorBody:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id, details]
+      properties:
+        code:
+          $ref: "#/components/schemas/ApiErrorCode"
+        message:
+          type: string
+          minLength: 1
+          maxLength: 512
+        request_id:
+          $ref: "#/components/schemas/Uuid"
+        details:
+          type: array
+          items:
+            $ref: "#/components/schemas/ErrorDetail"
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorBody"
+      examples:
+        - error:
+            code: device_not_found
+            message: No device in the caller's account matches this identifier.
+            request_id: "77777777-7777-4777-8777-777777777777"
+            details: []

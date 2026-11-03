@@ -1,0 +1,103 @@
+{
+  "api_version": "v1",
+  "openapi": "./api/openapi.yaml",
+  "booking_base_path": "/api/v1",
+  "implemented_booking_operations": [
+    {
+      "method": "GET",
+      "path": "/api/v1/health",
+      "auth": "none",
+      "scope": null,
+      "idempotency_key": false,
+      "notes": "Process liveness only. HTTP 200 and status ok do not mean a PC is connected or locked."
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/devices",
+      "auth": "oauth",
+      "scope": "devices:read",
+      "idempotency_key": false,
+      "notes": "Lists devices in the token account. Nested status has connectivity and access_state."
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/devices",
+      "auth": "oauth",
+      "scope": "devices:write",
+      "idempotency_key": true,
+      "notes": "Provisioning. Booking clients should not receive devices:write."
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/sessions",
+      "auth": "oauth",
+      "scope": "sessions:write",
+      "idempotency_key": true,
+      "notes": "Create is the start request. Returns {outcome, session, command}."
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/sessions/{session_id}",
+      "auth": "oauth",
+      "scope": "sessions:read",
+      "idempotency_key": false,
+      "notes": "Returns the session document unwrapped. sessions:write does not imply sessions:read."
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/sessions/{session_id}/extend",
+      "auth": "oauth",
+      "scope": "sessions:write",
+      "idempotency_key": true,
+      "notes": "Stores a later requested deadline. Confirmed only after a verified agent result."
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/sessions/{session_id}/end",
+      "auth": "oauth",
+      "scope": "sessions:write",
+      "idempotency_key": true,
+      "notes": "Stores an end request. Body is optional. A verified lock is lock_confirmed."
+    }
+  ],
+  "implemented_agent_operations": [
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/heartbeat",
+      "auth": "mtls",
+      "scope": null,
+      "idempotency_key": false,
+      "notes": "Windows agent only. Booking bearer tokens receive 403. Do not call from booking software."
+    }
+  ],
+  "planned_not_in_contract": [
+    {
+      "method": "GET",
+      "path": "/api/v1/devices/{device_id}",
+      "use_instead": "GET /api/v1/devices",
+      "documented_in": "api/future-endpoints.md"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/devices/{device_id}/status",
+      "use_instead": "GET /api/v1/devices",
+      "documented_in": "api/future-endpoints.md"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/commands/{command_id}",
+      "use_instead": "GET /api/v1/sessions/{session_id}",
+      "documented_in": "api/future-endpoints.md"
+    }
+  ],
+  "recommended_booking_scopes": [
+    "devices:read",
+    "sessions:read",
+    "sessions:write",
+    "commands:read"
+  ],
+  "token_audience": "gaming-pc-agent-api",
+  "account_claim": "account_id",
+  "idempotency_key_pattern": "^[A-Za-z0-9._:-]{8,128}$",
+  "expires_at_pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+}

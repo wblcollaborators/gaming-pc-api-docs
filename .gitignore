@@ -1,0 +1,68 @@
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+!api/examples/
+id_rsa
+id_rsa.pub
+credentials.json
+secrets/
+*.secret
+access_token*
+*_secret*
+
+# Agent and lab private data
+agent.toml
+*.sqlite
+*.sqlite3
+.pgdata/
+.mtls-dev/
+*.dump
+*.sql.gz
+
+# Proprietary software must never land in this docs repo
+controller/
+agent/
+*.exe
+*.msi
+*.dll
+*.so
+*.dylib
+*.whl
+*.tar.gz
+*.zip
+!api/**
+
+# Python / PHP local junk
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+vendor/
+composer.lock
+phpunit.xml
+
+# Editors and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Logs and temp
+*.log
+tmp/
+temp/
+.cache/
+
+# Local override notes that may contain hostnames or tokens
+LOCAL.md
+OPERATOR-NOTES.md
+.publish-notes.md
